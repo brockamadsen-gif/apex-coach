@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { fetchTodayStats, fetchConnections } from './lib/supabase.js'
 
 // ─── Strava integration ───────────────────────────────────────────────────────
 
@@ -231,24 +232,37 @@ Always reference specific data points. Be direct and concise. Flag concerns clea
 // ─── API call ─────────────────────────────────────────────────────────────────
 
 async function callClaude(messages, systemPrompt) {
-  const apiKey = import.meta.env.VITE_ANTHROPIC_KEY
-  if (!apiKey) throw new Error('VITE_ANTHROPIC_KEY not set')
-
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
-      system: systemPrompt,
-      messages,
-    }),
+  const body = JSON.stringify({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 1024,
+    system: systemPrompt,
+    messages,
   })
+
+  // Try the server-side proxy first (production / vercel dev), fall back to direct
+  const useProxy = window.location.hostname !== 'localhost' || !import.meta.env.VITE_ANTHROPIC_KEY
+  let res
+
+  if (!useProxy) {
+    const apiKey = import.meta.env.VITE_ANTHROPIC_KEY
+    if (!apiKey) throw new Error('VITE_ANTHROPIC_KEY not set')
+    res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body,
+    })
+  } else {
+    res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    })
+  }
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
@@ -326,7 +340,7 @@ function RunRow({ run }) {
 
 // ─── Connection card ──────────────────────────────────────────────────────────
 
-function ConnectionCard({ name, icon, description, connected, onConnect, onDisconnect, comingSoon }) {
+function ConnectionCard({ name, icon, description, connected, onConnect, onDisconnect, comingSoon, connecting }) {
   return (
     <div style={{
       background: '#141414',
@@ -350,6 +364,11 @@ function ConnectionCard({ name, icon, description, connected, onConnect, onDisco
       {comingSoon ? (
         <div style={{ fontSize: 11, color: '#555', border: '1px solid #2a2a2a', borderRadius: 6, padding: '4px 8px', flexShrink: 0 }}>
           Soon
+        </div>
+      ) : connecting ? (
+        <div style={{ fontSize: 12, color: '#666', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{ width: 12, height: 12, borderRadius: '50%', border: '2px solid #555', borderTopColor: '#c8fb57', animation: 'spin 0.8s linear infinite' }} />
+          Connecting…
         </div>
       ) : connected ? (
         <button
@@ -380,7 +399,7 @@ function ConnectionCard({ name, icon, description, connected, onConnect, onDisco
 
 // ─── Dashboard screen ─────────────────────────────────────────────────────────
 
-function Dashboard({ athlete, weekly, onAskCoach, stravaConnected, onConnectStrava, onDisconnectStrava, loading }) {
+function Dashboard({ athlete, weekly, onAskCoach, stravaConnected, onConnectStrava, onDisconnectStrava, loading, connections, onConnectApp, onDisconnectApp, connectingApp }) {
   const pct = weekly.targetMiles > 0 ? Math.round((weekly.totalMiles / weekly.targetMiles) * 100) : 0
   const hasRuns = athlete.recentRuns.length > 0
 
@@ -548,16 +567,29 @@ function Dashboard({ athlete, weekly, onAskCoach, stravaConnected, onConnectStra
           <ConnectionCard
             name="Garmin Connect"
             icon="⌚"
-            description="VO2 max, Body Battery, GPS splits — requires Composio setup"
-            connected={false}
-            comingSoon={true}
+            description="VO2 max, Body Battery, HRV, GPS splits"
+            connected={connections.garmin}
+            connecting={connectingApp === 'garmin'}
+            onConnect={() => onConnectApp('garmin')}
+            onDisconnect={() => onDisconnectApp('garmin')}
           />
           <ConnectionCard
             name="Oura Ring"
             icon="💍"
-            description="HRV, sleep stages, recovery score — requires Composio setup"
-            connected={false}
-            comingSoon={true}
+            description="HRV, sleep stages, readiness score"
+            connected={connections.oura}
+            connecting={connectingApp === 'oura'}
+            onConnect={() => onConnectApp('oura')}
+            onDisconnect={() => onDisconnectApp('oura')}
+          />
+          <ConnectionCard
+            name="WHOOP"
+            icon="📿"
+            description="Recovery %, strain score, HRV trend"
+            connected={connections.whoop}
+            connecting={connectingApp === 'whoop'}
+            onConnect={() => onConnectApp('whoop')}
+            onDisconnect={() => onDisconnectApp('whoop')}
           />
         </div>
       </div>
@@ -995,6 +1027,11 @@ export default function App() {
   const [stravaAthlete, setStravaAthlete] = useState(null)
   const [stravaActivities, setStravaActivities] = useState([])
 
+  // Supabase / Composio state
+  const [dailyStats, setDailyStats] = useState(null)
+  const [connections, setConnections] = useState({ garmin: false, oura: false, whoop: false })
+  const [connectingApp, setConnectingApp] = useState(null)
+
   // Load Strava data from token
   const loadStravaData = useCallback(async () => {
     try {
@@ -1018,6 +1055,13 @@ export default function App() {
     }
   }, [])
 
+  // Load Supabase data (HRV, recovery, sleep, connection status)
+  const loadSupabaseData = useCallback(async () => {
+    const [stats, conn] = await Promise.all([fetchTodayStats(), fetchConnections()])
+    if (stats) setDailyStats(stats)
+    if (conn) setConnections({ garmin: conn.garmin_connected, oura: conn.oura_connected, whoop: conn.whoop_connected })
+  }, [])
+
   // Handle Strava OAuth callback (code in URL)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -1025,9 +1069,7 @@ export default function App() {
     const scope = params.get('scope')
 
     if (code && scope && scope.includes('activity')) {
-      // Clean the URL
       window.history.replaceState({}, '', window.location.pathname)
-
       ;(async () => {
         try {
           setStravaLoading(true)
@@ -1046,6 +1088,13 @@ export default function App() {
     }
   }, [loadStravaData])
 
+  // Load Supabase data on mount and poll every 60s for fresh webhook data
+  useEffect(() => {
+    loadSupabaseData()
+    const interval = setInterval(loadSupabaseData, 60_000)
+    return () => clearInterval(interval)
+  }, [loadSupabaseData])
+
   const handleConnectStrava = () => {
     if (!STRAVA_CLIENT_ID) return
     window.location.href = stravaAuthUrl()
@@ -1058,18 +1107,51 @@ export default function App() {
     setStravaActivities([])
   }
 
-  // Build effective athlete data (real data overrides base)
+  const handleConnectApp = async (app) => {
+    setConnectingApp(app)
+    try {
+      const res = await fetch('/api/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ app }),
+      })
+      const data = await res.json()
+      if (data.error) throw new Error(data.error)
+      window.location.href = data.redirectUrl
+    } catch (e) {
+      setStravaError(`Could not connect ${app}: ${e.message}. Make sure COMPOSIO_API_KEY is set and you're running vercel dev.`)
+      setConnectingApp(null)
+    }
+  }
+
+  const handleDisconnectApp = (app) => {
+    setConnections(prev => ({ ...prev, [app]: false }))
+  }
+
+  // Build effective athlete data — Supabase overrides base, Strava provides runs
   const runs = stravaActivities.slice(0, 5).map(mapStravaRun)
   const { totalMiles, trend } = stravaConnected && stravaActivities.length
     ? computeWeeklyMiles(stravaActivities)
     : { totalMiles: 0, trend: '—' }
+
+  const connectedApps = [
+    stravaConnected && 'Strava',
+    connections.garmin && 'Garmin',
+    connections.oura && 'Oura Ring',
+    connections.whoop && 'WHOOP',
+  ].filter(Boolean)
 
   const athlete = {
     ...ATHLETE_BASE,
     name: stravaAthlete ? stravaAthlete.firstname : ATHLETE_BASE.name,
     recentRuns: stravaConnected ? runs : [],
     weeklyMileage: totalMiles,
-    connectedApps: stravaConnected ? ['Strava'] : [],
+    connectedApps,
+    hrv: dailyStats?.hrv_ms ?? '—',
+    restingHR: dailyStats?.resting_hr ?? '—',
+    recoveryScore: dailyStats?.recovery_score ?? '—',
+    avgSleep: dailyStats?.sleep_hours ?? '—',
+    vo2max: dailyStats?.vo2max ?? '—',
   }
 
   const weekly = {
@@ -1109,6 +1191,10 @@ export default function App() {
             onConnectStrava={handleConnectStrava}
             onDisconnectStrava={handleDisconnectStrava}
             loading={stravaLoading}
+            connections={connections}
+            onConnectApp={handleConnectApp}
+            onDisconnectApp={handleDisconnectApp}
+            connectingApp={connectingApp}
           />
         )}
         {tab === 'coach' && (
