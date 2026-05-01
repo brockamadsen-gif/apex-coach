@@ -194,11 +194,16 @@ const PRESET_GOALS = [
 // ─── Claude context builder ───────────────────────────────────────────────────
 
 function buildCoachContext(athlete, weekly, goal) {
+  const now = new Date()
+  const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+  const timeStr = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
   const runs = athlete.recentRuns.length
     ? athlete.recentRuns.map(r => `- ${r.date}: ${r.type}, ${r.distance} mi @ ${r.pace}/mi${r.avgHR ? `, avg HR ${r.avgHR} bpm` : ''}${r.name ? ` (${r.name})` : ''}`).join('\n')
     : '- No runs synced yet'
 
   return `You are Apex Coach, an expert AI running and fitness coach. You have full access to this athlete's training data. Always give specific, empirical advice based on their actual numbers — never generic advice.
+
+TODAY: ${dateStr} at ${timeStr}
 
 ATHLETE PROFILE:
 - Name: ${athlete.name}
