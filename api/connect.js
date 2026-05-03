@@ -4,8 +4,6 @@ export default async function handler(req, res) {
   const { app } = req.body
   if (!app) return res.status(400).json({ error: 'app is required' })
 
-  const baseUrl = req.headers.origin || 'http://localhost:3000'
-
   const response = await fetch('https://backend.composio.dev/api/v1/connectedAccounts', {
     method: 'POST',
     headers: {
@@ -15,7 +13,6 @@ export default async function handler(req, res) {
     body: JSON.stringify({
       appName: app,
       entityId: 'default',
-      redirectUri: baseUrl,
     }),
   })
 
